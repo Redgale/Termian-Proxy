@@ -12,20 +12,36 @@ exports.handler = async (event) => {
       };
     }
 
-    // Fetch the page
-    const response = await axios.get(url, {
+    const targetUrl = decodeURIComponent(url);
+    const baseUrl = new URL(targetUrl);
+
+    // Fetch the target page, including redirects
+    const response = await axios.get(targetUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
         'Accept-Language': 'en-US,en;q=0.9',
       },
-      withCredentials: true
+      maxRedirects: 5,
+      withCredentials: true,
+      validateStatus: () => true,  // Capture all status codes
     });
 
-    const dom = new JSDOM(response.data);
-    const baseUrl = new URL(url);
-    const elements = dom.window.document.querySelectorAll("[href], [src], [action]");
+    // Handle redirects
+    if (response.status >= 300 && response.status < 400 && response.headers.location) {
+      const redirectUrl = new URL(response.headers.location, baseUrl);
+      return {
+        statusCode: 302,
+        headers: {
+          Location: `/proxy?url=${encodeURIComponent(redirectUrl.href)}`,
+        },
+        body: '',
+      };
+    }
 
-    // Rewrite links, src, and form actions
+    const dom = new JSDOM(response.data);
+    const elements = dom.window.document.querySelectorAll("[href], [src], [action], form");
+
+    // Rewrite URLs to point back to the proxy
     elements.forEach((el) => {
       if (el.href && el.href.startsWith(baseUrl.origin)) {
         el.href = `/proxy?url=${encodeURIComponent(el.href)}`;
@@ -36,13 +52,18 @@ exports.handler = async (event) => {
       if (el.action && el.action.startsWith(baseUrl.origin)) {
         el.action = `/proxy?url=${encodeURIComponent(el.action)}`;
       }
+      // Rewrite form submissions to the proxy
+      if (el.tagName === 'FORM' && el.action) {
+        const actionUrl = new URL(el.action, baseUrl);
+        el.action = `/proxy?url=${encodeURIComponent(actionUrl.href)}`;
+      }
     });
 
     return {
       statusCode: 200,
       headers: {
         'Content-Type': 'text/html',
-        'Access-Control-Allow-Origin': '*',  // Allow cross-origin access
+        'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type, Authorization'
       },
