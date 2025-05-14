@@ -1,10 +1,9 @@
 [build]
-  command   = "npm run build"
-  publish   = "dist/"
-  functions = ""          # no functions needed
+  command = "npm install"
+  publish = "public"
+  functions = "functions"
 
-# (Optional) catch-all for SPA-like routing:
-# [[redirects]]
-#   from = "/*"
-#   to = "/index.html"
-#   status = 200
+[[redirects]]
+  from = "/proxy"
+  to = "/.netlify/functions/proxy"
+  status = 200
