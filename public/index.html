@@ -1,0 +1,31 @@
+<!-- public/index.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Proxy</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        input[type="text"] { width: 80%; padding: 10px; margin-bottom: 10px; }
+        button { padding: 10px; }
+    </style>
+</head>
+<body>
+    <h1>Enter the URL to Proxy</h1>
+    <input type="text" id="urlInput" placeholder="https://example.com" />
+    <button onclick="openProxy()">Go</button>
+
+    <script>
+        function openProxy() {
+            const url = document.getElementById('urlInput').value;
+            if (!url.startsWith('http')) {
+                alert('Please enter a valid URL (e.g., https://example.com)');
+                return;
+            }
+            const encodedUrl = encodeURIComponent(url);
+            window.location.href = `/proxy?url=${encodedUrl}`;
+        }
+    </script>
+</body>
+</html>
