@@ -12,25 +12,40 @@ exports.handler = async (event) => {
       };
     }
 
-    const response = await axios.get(url);
+    // Fetch the page
+    const response = await axios.get(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+      withCredentials: true
+    });
+
     const dom = new JSDOM(response.data);
-
-    // Rewrite all links and asset URLs to be relative
     const baseUrl = new URL(url);
-    const elements = dom.window.document.querySelectorAll("[href], [src]");
+    const elements = dom.window.document.querySelectorAll("[href], [src], [action]");
 
+    // Rewrite links, src, and form actions
     elements.forEach((el) => {
       if (el.href && el.href.startsWith(baseUrl.origin)) {
-        el.href = el.href.replace(baseUrl.origin, '');
+        el.href = `/proxy?url=${encodeURIComponent(el.href)}`;
       }
       if (el.src && el.src.startsWith(baseUrl.origin)) {
-        el.src = el.src.replace(baseUrl.origin, '');
+        el.src = `/proxy?url=${encodeURIComponent(el.src)}`;
+      }
+      if (el.action && el.action.startsWith(baseUrl.origin)) {
+        el.action = `/proxy?url=${encodeURIComponent(el.action)}`;
       }
     });
 
     return {
       statusCode: 200,
-      headers: { 'Content-Type': 'text/html' },
+      headers: {
+        'Content-Type': 'text/html',
+        'Access-Control-Allow-Origin': '*',  // Allow cross-origin access
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+      },
       body: dom.serialize(),
     };
   } catch (error) {
