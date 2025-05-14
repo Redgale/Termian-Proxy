@@ -11,7 +11,7 @@ const CORS = {
 const wrap = url => `/proxy?url=${encodeURIComponent(url)}`;
 
 exports.handler = async (event) => {
-  // 1) Preflight
+  // 1) CORS preflight
   if (event.httpMethod === 'OPTIONS') {
     return { statusCode: 204, headers: CORS, body: '' };
   }
@@ -29,7 +29,7 @@ exports.handler = async (event) => {
     const target = decodeURIComponent(raw);
     const base = new URL(target);
 
-    // 2) Fetch everything as arraybuffer
+    // 2) Fetch as binary to proxy images/CSS/JS/fonts/etc.
     const resp = await axios.get(target, {
       responseType: 'arraybuffer',
       maxRedirects: 5,
@@ -40,7 +40,7 @@ exports.handler = async (event) => {
       }
     });
 
-    // 3) Redirects
+    // 3) Handle HTTP redirects (3xx)
     if (resp.status >= 300 && resp.status < 400 && resp.headers.location) {
       const loc = new URL(resp.headers.location, base).href;
       return {
@@ -52,7 +52,7 @@ exports.handler = async (event) => {
 
     const cType = resp.headers['content-type'] || '';
 
-    // 4) Non‑HTML assets (images, CSS, JS, fonts…)
+    // 4) Non‑HTML assets: stream back base64
     if (!cType.includes('text/html')) {
       return {
         statusCode: resp.status,
@@ -62,15 +62,25 @@ exports.handler = async (event) => {
       };
     }
 
-    // 5) HTML: parse & rewrite
+    // 5) HTML: parse, inject <base>, rewrite URLs
     const html = resp.data.toString('utf8');
     const dom = new JSDOM(html);
     const doc = dom.window.document;
 
-    // helper: normalize and wrap any URL
+    // --- Inject <base> so relative URLs resolve via our proxy ---
+    const proxyBase = '/proxy?url=' + encodeURIComponent(target);
+    const baseTag = doc.createElement('base');
+    baseTag.setAttribute('href', proxyBase + '&path=');
+    if (doc.head.firstChild) {
+      doc.head.insertBefore(baseTag, doc.head.firstChild);
+    } else {
+      doc.head.appendChild(baseTag);
+    }
+
+    // Helper: normalize and wrap any URL
     function normalizeAndWrap(val) {
       if (!val) return val;
-      // protocol-relative: //foo → https://foo
+      // protocol‑relative: //foo → https://foo
       if (val.startsWith('//')) {
         return wrap('https:' + val);
       }
@@ -78,20 +88,20 @@ exports.handler = async (event) => {
       if (/^https?:\/\//.test(val)) {
         return wrap(val);
       }
-      // root-relative
+      // root‑relative
       if (val.startsWith('/')) {
         return wrap(new URL(val, base).href);
       }
-      // leave others (anchors, data URIs) alone
+      // leave anchors, data URIs, JS snippets untouched
       return val;
     }
 
-    // Rewrite all href/src/action
+    // Rewrite href, src, action attributes
     ['href','src','action'].forEach(attr => {
       doc.querySelectorAll(`[${attr}]`).forEach(el => {
-        const v = el.getAttribute(attr);
-        const nv = normalizeAndWrap(v);
-        if (nv) el.setAttribute(attr, nv);
+        const original = el.getAttribute(attr);
+        const rewritten = normalizeAndWrap(original);
+        if (rewritten) el.setAttribute(attr, rewritten);
       });
     });
 
@@ -102,7 +112,7 @@ exports.handler = async (event) => {
       form.setAttribute('method', form.method || 'GET');
     });
 
-    // Rewrite CSS url(...) in <style> and inline style=""
+    // Rewrite CSS url(...) in <style> blocks and inline style=""
     const cssUrlRegex = /(url\(['"]?)([^'")]+)(['"]?\))/g;
     function rewriteCssText(txt) {
       return txt.replace(cssUrlRegex, (_m, pre, ref, post) => {
@@ -117,6 +127,7 @@ exports.handler = async (event) => {
       el.setAttribute('style', rewriteCssText(el.getAttribute('style')));
     });
 
+    // 6) Return rewritten HTML
     return {
       statusCode: 200,
       headers: { 'Content-Type': 'text/html', ...CORS },
@@ -125,6 +136,10 @@ exports.handler = async (event) => {
 
   } catch (err) {
     console.error('Proxy error:', err);
-    return { statusCode: 500, headers: CORS, body: '❌ Proxy fetch failed' };
+    return {
+      statusCode: 500,
+      headers: CORS,
+      body: '❌ Proxy fetch failed'
+    };
   }
 };
