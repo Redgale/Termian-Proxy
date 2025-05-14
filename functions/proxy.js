@@ -2,18 +2,40 @@
 const axios = require('axios');
 const { JSDOM } = require('jsdom');
 
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+};
+
+// Utility to build a proxied URL
+const wrap = url => `/proxy?url=${encodeURIComponent(url)}`;
+
 exports.handler = async (event) => {
+  // 1) Handle CORS preflight
+  if (event.httpMethod === 'OPTIONS') {
+    return {
+      statusCode: 204,
+      headers: CORS_HEADERS,
+      body: '',
+    };
+  }
+
   try {
-    const { url } = event.queryStringParameters || {};
-    if (!url || !/^https?:\/\//.test(url)) {
-      return { statusCode: 400, body: '🔗 Invalid URL: include the full URL, e.g. https://example.com' };
+    const raw = event.queryStringParameters && event.queryStringParameters.url;
+    if (!raw || !/^https?:\/\//.test(raw)) {
+      return {
+        statusCode: 400,
+        headers: CORS_HEADERS,
+        body: '🔗 Invalid URL. Include full URL, e.g. https://example.com',
+      };
     }
 
-    const targetUrl = decodeURIComponent(url);
-    const baseUrl = new URL(targetUrl);
+    const target = decodeURIComponent(raw);
+    const base = new URL(target);
 
-    // Fetch everything as arraybuffer so we can forward binary assets too
-    const resp = await axios.get(targetUrl, {
+    // 2) Fetch everything as binary so we can proxy images/CSS/JS/fonts/etc.
+    const resp = await axios.get(target, {
       responseType: 'arraybuffer',
       maxRedirects: 5,
       validateStatus: () => true,
@@ -23,84 +45,95 @@ exports.handler = async (event) => {
       }
     });
 
-    // Handle HTTP redirect status (3xx)
+    // 3) Redirects: re‑route them through our proxy
     if (resp.status >= 300 && resp.status < 400 && resp.headers.location) {
-      const location = new URL(resp.headers.location, baseUrl).href;
+      const loc = new URL(resp.headers.location, base).href;
       return {
         statusCode: 302,
         headers: {
-          'Location': `/proxy?url=${encodeURIComponent(location)}`,
-          'Access-Control-Allow-Origin': '*',
+          ...CORS_HEADERS,
+          Location: wrap(loc),
         },
-        body: ''
+        body: '',
       };
     }
 
-    const contentType = resp.headers['content-type'] || '';
+    const type = resp.headers['content-type'] || '';
 
-    // If not HTML, just stream it back
-    if (!contentType.includes('text/html')) {
+    // 4) Non-HTML: stream back base64 so images/CSS/JS/fonts work
+    if (!type.includes('text/html')) {
       return {
         statusCode: resp.status,
+        isBase64Encoded: true,
         headers: {
-          'Content-Type': contentType,
-          'Access-Control-Allow-Origin': '*',
+          'Content-Type': type,
+          ...CORS_HEADERS,
         },
         body: Buffer.from(resp.data, 'binary').toString('base64'),
-        isBase64Encoded: true
       };
     }
 
-    // === HTML case: parse & rewrite ===
+    // 5) HTML: parse & rewrite
     const html = resp.data.toString('utf8');
     const dom = new JSDOM(html);
     const doc = dom.window.document;
+
+    // Rewrite any absolute URL in href/src/action/style(url())
     const rewriteAttr = (el, attr) => {
       const val = el.getAttribute(attr);
       if (!val) return;
-      // build absolute URL then map it back through our proxy
-      let abs = new URL(val, baseUrl).href;
-      el.setAttribute(attr, `/proxy?url=${encodeURIComponent(abs)}`);
+      // Only rewrite absolute http(s) URLs
+      if (/^https?:\/\//.test(val)) {
+        el.setAttribute(attr, wrap(val));
+      } else if (val.startsWith('/')) {
+        // handle root‑relative URLs
+        el.setAttribute(attr, wrap(new URL(val, base).href));
+      }
     };
 
-    // Rewrite href/src/action on all elements
-    doc.querySelectorAll('[href]').forEach(el => rewriteAttr(el, 'href'));
-    doc.querySelectorAll('[src]').forEach(el => rewriteAttr(el, 'src'));
-    doc.querySelectorAll('form[action]').forEach(el => rewriteAttr(el, 'action'));
+    // Attributes
+    ['href','src','action'].forEach(attr => {
+      doc.querySelectorAll(`[${attr}]`).forEach(el => rewriteAttr(el, attr));
+    });
+    // Forms
+    doc.querySelectorAll('form').forEach(form => {
+      const act = form.getAttribute('action') || base.href;
+      form.setAttribute('action', wrap(new URL(act, base).href));
+      form.setAttribute('method', form.method || 'GET');
+    });
 
-    // Optional: rewrite CSS @import or url(...) inside <style> tags and inline style attributes
-    doc.querySelectorAll('style').forEach(styleTag => {
-      styleTag.textContent = styleTag.textContent.replace(
-        /(url\(['"]?)([^'")]+)(['"]?\))/g,
-        (_, pre, urlRef, post) => {
-          const abs = new URL(urlRef, baseUrl).href;
-          return `${pre}/proxy?url=${encodeURIComponent(abs)}${post}`;
-        }
-      );
+    // Inline <style> and style="" url(...) references
+    const rewriteCss = txt => txt.replace(
+      /(url\(['"]?)([^'")]+)(['"]?\))/g,
+      (_, prefix, ref, suffix) => {
+        const abs = /^https?:\/\//.test(ref)
+          ? ref
+          : new URL(ref, base).href;
+        return `${prefix}${wrap(abs)}${suffix}`;
+      }
+    );
+    doc.querySelectorAll('style').forEach(tag => {
+      tag.textContent = rewriteCss(tag.textContent);
     });
     doc.querySelectorAll('[style]').forEach(el => {
-      el.setAttribute('style', el.getAttribute('style').replace(
-        /(url\(['"]?)([^'")]+)(['"]?\))/g,
-        (_, pre, urlRef, post) => {
-          const abs = new URL(urlRef, baseUrl).href;
-          return `${pre}/proxy?url=${encodeURIComponent(abs)}${post}`;
-        }
-      ));
+      el.setAttribute('style', rewriteCss(el.getAttribute('style')));
     });
 
     return {
       statusCode: 200,
       headers: {
         'Content-Type': 'text/html',
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+        ...CORS_HEADERS
       },
       body: dom.serialize(),
     };
 
   } catch (err) {
     console.error('Proxy error:', err);
-    return { statusCode: 500, body: '❌ Proxy fetch failed' };
+    return {
+      statusCode: 500,
+      headers: CORS_HEADERS,
+      body: '❌ Proxy fetch failed'
+    };
   }
 };
